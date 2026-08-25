@@ -1,8 +1,8 @@
 /**
- * TMDB API Service supporting Actor & Director Combined Credits & Session Caching
+ * TMDB API Service supporting Actor & Director Combined Credits, Serverless Proxy & Session Caching
  */
 
-export const DEFAULT_TMDB_API_KEY = "528acb56b0bcc343f10877af2195e92c"; // Default fallback API key for production deploys
+export const DEFAULT_TMDB_API_KEY = "528acb56b0bcc343f10877af2195e92c";
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/';
@@ -12,6 +12,7 @@ const personSearchCache = new Map();
 const personCreditsCache = new Map();
 const directorCreditsCache = new Map();
 const mediaCreditsCache = new Map();
+const mediaKeywordsCache = new Map();
 const personDetailsCache = new Map();
 
 export function getApiKey() {
@@ -42,6 +43,37 @@ export function getPosterUrl(path, size = 'w342') {
 
 async function tmdbFetch(endpoint, params = {}) {
   const apiKey = getApiKey();
+
+  // Route through Vercel Serverless Proxy in production to bypass mobile carrier ISP blocks & CORS
+  const isProduction = import.meta.env.PROD || window.location.hostname.includes('vercel.app');
+
+  if (isProduction) {
+    try {
+      const queryParams = new URLSearchParams({
+        endpoint,
+        ...params,
+      });
+      const proxyUrl = `/api/tmdb?${queryParams.toString()}`;
+      const response = await fetch(proxyUrl);
+
+      if (response.status === 401) {
+        throw new Error('INVALID_API_KEY');
+      }
+      if (response.status === 429) {
+        throw new Error('RATE_LIMIT');
+      }
+      if (response.ok) {
+        return response.json();
+      }
+    } catch (err) {
+      if (err.message === 'INVALID_API_KEY' || err.message === 'RATE_LIMIT') {
+        throw err;
+      }
+      console.warn('Vercel API proxy failed, falling back to direct fetch:', err);
+    }
+  }
+
+  // Direct fetch fallback (for local development)
   if (!apiKey) {
     throw new Error('NO_API_KEY');
   }
@@ -85,17 +117,14 @@ export async function searchPerson(query, mode = 'actor') {
     let results = data.results || [];
 
     if (mode === 'director') {
-      // STRICT DIRECTOR FILTERING: Must be registered in Directing department
       results = results.filter((p) => {
         if (p.known_for_department === 'Directing') return true;
         if (p.known_for && p.known_for.some(k => k.job === 'Director' || k.department === 'Directing')) return true;
-        // Known auteur exception list (actors who are also famous directors)
         const famousAuteurs = ['clint eastwood', 'woody allen', 'mel gibson', 'ben affleck', 'jon favreau', 'taika waititi', 'jordan peele', 'orson welles', 'charlie chaplin', 'greta gerwig', 'brad bird', 'george clooney', 'john krasinski'];
         if (famousAuteurs.includes(p.name?.toLowerCase())) return true;
         return false;
       });
     } else {
-      // STRICT ACTOR FILTERING: Must be registered in Acting department
       results = results.filter((p) => {
         if (p.known_for_department === 'Acting') return true;
         if (p.known_for && p.known_for.some(k => k.media_type === 'movie' || k.media_type === 'tv')) return true;
@@ -141,7 +170,6 @@ export async function getPersonCredits(personId) {
   try {
     const data = await tmdbFetch(`/person/${personId}/combined_credits`);
 
-    // Normalize acting credits (all available productions)
     const cast = (data.cast || [])
       .filter((m) => m.id && (m.title || m.name))
       .map((m) => ({
@@ -176,7 +204,6 @@ export async function getDirectorCredits(personId) {
   try {
     const data = await tmdbFetch(`/person/${personId}/combined_credits`);
 
-    // Filter crew array where job === 'Director' or department === 'Directing'
     const directed = (data.crew || [])
       .filter((m) => m.id && (m.title || m.name) && (m.job === 'Director' || m.department === 'Directing'))
       .map((m) => ({
@@ -214,12 +241,35 @@ export async function getMediaCredits(mediaId, mediaType = 'movie') {
 
     const cast = (data.cast || [])
       .filter((a) => a.id && a.name)
-      .slice(0, 300); // Expanded top 300 billed actors per production
+      .slice(0, 300);
 
     mediaCreditsCache.set(cacheKey, cast);
     return cast;
   } catch (err) {
     console.error(`TMDB cast error for ${mediaType} ${mediaId}:`, err);
     throw err;
+  }
+}
+
+/**
+ * Fetch live TMDB keywords for award tag detection
+ */
+export async function getMediaKeywords(mediaId, mediaType = 'movie') {
+  const cacheKey = `${mediaType}_${mediaId}`;
+  if (mediaKeywordsCache.has(cacheKey)) {
+    return mediaKeywordsCache.get(cacheKey);
+  }
+
+  try {
+    const endpoint = mediaType === 'tv' ? `/tv/${mediaId}/keywords` : `/movie/${mediaId}/keywords`;
+    const data = await tmdbFetch(endpoint);
+    const rawKeywords = data.keywords || data.results || [];
+    const keywords = rawKeywords.map((k) => k.name.toLowerCase());
+
+    mediaKeywordsCache.set(cacheKey, keywords);
+    return keywords;
+  } catch (err) {
+    console.error(`TMDB keywords error for ${mediaType} ${mediaId}:`, err);
+    return [];
   }
 }
