@@ -2,7 +2,7 @@
  * TMDB API Service supporting Actor & Director Combined Credits & Session Caching
  */
 
-export const DEFAULT_TMDB_API_KEY = ""; // <-- PASTE YOUR TMDB API KEY HERE
+export const DEFAULT_TMDB_API_KEY = "528acb56b0bcc343f10877af2195e92c"; // Default fallback API key for production deploys
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/';
